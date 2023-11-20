@@ -1,9 +1,9 @@
 {
   "task": "lits",
-  "train-data": "/workspace/data/lits/raw/train",
+  "train-data": "/path/to/lits/data/",
   "modality": "ct",
   "mask": [
-    "segmentation"
+    "segmentation_binary"
   ],
   "images": {
     "CT": [
@@ -12,15 +12,11 @@
   },
   "labels": [
     0,
-    1,
-    2
+    1
   ],
   "final_classes": {
     "liver": [
-      1, 2
-    ],
-    "tumor": [
-      2
+      1
     ]
     }
   }

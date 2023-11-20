@@ -39,7 +39,8 @@ class GenericPipeline(Pipeline):
             num_gpus,
             shuffle_input=True,
             input_x_files=None,
-            input_y_files=None
+            input_y_files=None,
+            input_dtm_files=None
     ):
         super().__init__(
             batch_size=batch_size,
@@ -64,16 +65,25 @@ class GenericPipeline(Pipeline):
                 num_shards=num_gpus,
                 shuffle=shuffle_input,
             )
+        if input_dtm_files is not None:
+            self.input_dtm = get_numpy_reader(
+                files=input_dtm_files,
+                shard_id=shard_id,
+                seed=seed,
+                num_shards=num_gpus,
+                shuffle=shuffle_input,
+            )
 
 
 class TrainPipeline(GenericPipeline):
     def __init__(self,
                  imgs,
                  lbls,
+                 dtms,
                  oversampling,
                  patch_size,
                  **kwargs):
-        super().__init__(input_x_files=imgs, input_y_files=lbls, shuffle_input=True, **kwargs)
+        super().__init__(input_x_files=imgs, input_y_files=lbls, input_dtm_files=dtms, shuffle_input=True, **kwargs)
         self.oversampling = oversampling
         self.patch_size = patch_size
 
@@ -81,18 +91,19 @@ class TrainPipeline(GenericPipeline):
         self.crop_shape_float = types.Constant(np.array(self.patch_size), dtype=types.FLOAT)
 
     def load_data(self):
-        img, lbl = self.input_x(name="ReaderX"), self.input_y(name="ReaderY")
-        img, lbl = fn.reshape(img, layout="DHWC"), fn.reshape(lbl, layout="DHWC")
-        return img, lbl
+        img, lbl, dtm = self.input_x(name="ReaderX"), self.input_y(name="ReaderY"), self.input_dtm(name="ReaderDTM")
+        img, lbl, dtm = fn.reshape(img, layout="DHWC"), fn.reshape(lbl, layout="DHWC"), fn.reshape(dtm, layout="DHWC")
+        return img, lbl, dtm
 
     @staticmethod
     def slice_fn(img):
         return fn.slice(img, 1, 3, axes=[0])
 
-    def biased_crop_fn(self, img, lbl):
+    def biased_crop_fn(self, img, lbl, dtm):
         # Pad image and label to have dimensions at least the same as the patch size
         img = fn.pad(img, axes=(0, 1, 2), shape=self.patch_size)
         lbl = fn.pad(lbl, axes=(0, 1, 2), shape=self.patch_size)
+        dtm = fn.pad(dtm, axes=(0, 1, 2), shape=self.patch_size)
 
         roi_start, roi_end = fn.segmentation.random_object_bbox(
             lbl,
@@ -109,8 +120,8 @@ class TrainPipeline(GenericPipeline):
             crop_shape=[*self.patch_size, 1],
         )
         anchor = fn.slice(anchor, 0, 3, axes=[0])  # drop channel from anchor
-        img, lbl = fn.slice(
-            [img, lbl],
+        img, lbl, dtm = fn.slice(
+            [img, lbl, dtm],
             anchor,
             self.crop_shape,
             axis_names="DHW",
@@ -118,20 +129,20 @@ class TrainPipeline(GenericPipeline):
             device="cpu",
         )
 
-        return img.gpu(), lbl.gpu()
+        return img.gpu(), lbl.gpu(), dtm.gpu()
 
-    def zoom_fn(self, img, lbl):
-        scale = random_augmentation(0.15, fn.random.uniform(range=(0.7, 1.0)), 1.0)
-        d, h, w = [scale * x for x in self.patch_size]
-
-        img, lbl = fn.crop(img, crop_h=h, crop_w=w, crop_d=d), fn.crop(lbl, crop_h=h, crop_w=w, crop_d=d)
-        img = fn.resize(
-            img,
-            interp_type=types.DALIInterpType.INTERP_CUBIC,
-            size=self.crop_shape_float,
-        )
-        lbl = fn.resize(lbl, interp_type=types.DALIInterpType.INTERP_NN, size=self.crop_shape_float)
-        return img, lbl
+    # def zoom_fn(self, img, lbl):
+    #     scale = random_augmentation(0.15, fn.random.uniform(range=(0.7, 1.0)), 1.0)
+    #     d, h, w = [scale * x for x in self.patch_size]
+    #
+    #     img, lbl = fn.crop(img, crop_h=h, crop_w=w, crop_d=d), fn.crop(lbl, crop_h=h, crop_w=w, crop_d=d)
+    #     img = fn.resize(
+    #         img,
+    #         interp_type=types.DALIInterpType.INTERP_CUBIC,
+    #         size=self.crop_shape_float,
+    #     )
+    #     lbl = fn.resize(lbl, interp_type=types.DALIInterpType.INTERP_NN, size=self.crop_shape_float)
+    #     return img, lbl
 
     def noise_fn(self, img):
         img_noised = img + fn.random.normal(img, stddev=fn.random.uniform(range=(0.0, 0.33)))
@@ -151,19 +162,19 @@ class TrainPipeline(GenericPipeline):
         img = math.clamp(img * scale, min_, max_)
         return img
 
-    def flips_fn(self, img, lbl):
+    def flips_fn(self, img, lbl, dtm):
         kwargs = {
             'horizontal': fn.random.coin_flip(probability=0.5),
             'vertical': fn.random.coin_flip(probability=0.5),
             'depthwise': fn.random.coin_flip(probability=0.5)
         }
-        return fn.flip(img, **kwargs), fn.flip(lbl, **kwargs)
+        return fn.flip(img, **kwargs), fn.flip(lbl, **kwargs), fn.flip(dtm, **kwargs)
 
     def define_graph(self):
-        img, lbl = self.load_data()
-        img, lbl = self.biased_crop_fn(img, lbl)
-        img, lbl = self.zoom_fn(img, lbl)
-        img, lbl = self.flips_fn(img, lbl)
+        img, lbl, dtm = self.load_data()
+        img, lbl, dtm = self.biased_crop_fn(img, lbl, dtm)
+        # img, lbl = self.zoom_fn(img, lbl)
+        img, lbl, dtm = self.flips_fn(img, lbl, dtm)
         img = self.noise_fn(img)
         img = self.blur_fn(img)
         img = self.brightness_fn(img)
@@ -172,8 +183,9 @@ class TrainPipeline(GenericPipeline):
         # Change format to CDWH for pytorch compatibility
         img = fn.transpose(img, perm=[3, 0, 1, 2])
         lbl = fn.transpose(lbl, perm=[3, 0, 1, 2])
+        dtm = fn.transpose(dtm, perm=[3, 0, 1, 2])
 
-        return img, lbl
+        return img, lbl, dtm
 
 
 class TestPipeline(GenericPipeline):
@@ -213,6 +225,7 @@ def check_dataset(imgs, lbls):
 
 def get_training_dataset(imgs,
                          lbls,
+                         dtms,
                          batch_size,
                          oversampling,
                          patch_size,
@@ -231,8 +244,8 @@ def get_training_dataset(imgs,
         "shard_id": rank
     }
 
-    pipeline = TrainPipeline(imgs, lbls, oversampling, patch_size, **pipe_kwargs)
-    dali_iter = DALIGenericIterator(pipeline, ['image', 'label'])
+    pipeline = TrainPipeline(imgs, lbls, dtms, oversampling, patch_size, **pipe_kwargs)
+    dali_iter = DALIGenericIterator(pipeline, ["image", "label", "dtm"])
     return dali_iter
 
 

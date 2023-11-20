@@ -149,7 +149,7 @@ class Analyzer:
         dims = [int(np.round((dims[i] * mask_spacing[i]) / self.config["target_spacing"][i])) for i in range(len(dims))]
 
         # Get image buffer sizes
-        image_memory_size = 4 * (np.prod(dims) * (n_channels + len(self.labels)))
+        image_memory_size = 4 * (np.prod(dims) * (n_channels + 2*len(self.labels)))
         return dims, image_memory_size
 
     def check_resampled_dims(self, cropped_dims):

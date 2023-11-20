@@ -111,8 +111,8 @@ def preprocess_example(config, image_list, mask):
         nzmask = (images[0] != 0).astype("float32")
 
         # Put nzmask into standard space
-        image = ants.reorient_image2(nzmask, "RAI")
-        image.set_direction(np.eye(3))
+        nzmask = ants.reorient_image2(nzmask, "RAI")
+        nzmask.set_direction(np.eye(3))
         if not np.array_equal(nzmask.spacing, config["target_spacing"]):
             nzmask = ants.resample_image(nzmask,
                                          resample_params=config['target_spacing'],
@@ -167,11 +167,27 @@ def preprocess_example(config, image_list, mask):
         # Convert to numpy and get one hot encoding
         mask_npy = mask.numpy()
         mask_onehot = np.zeros((*dims, len(config['labels'])))
+        dtm = np.zeros((*dims, len(config['labels'])))
         for j in range(len(config['labels'])):
             mask_onehot[..., j] = (mask_npy == config['labels'][j]).astype('float32')
+
+            # Only compute DTM if class exists in image
+            if np.sum(mask_onehot[..., j]) > 0:
+                dtm_j = mask_onehot[..., j].reshape(dims)
+                dtm_j = mask.new_image_like(data=dtm_j)
+                dtm_j = ants.iMath(dtm_j, 'MaurerDistance')
+                dtm[..., j] = dtm_j.numpy()
+            else:
+                # Otherwise, use diagonal distance of image as the value
+                width = dims[0] * config["target_spacing"][0]
+                height = dims[1] * config["target_spacing"][1]
+                depth = dims[2] * config["target_spacing"][2]
+                dtm[..., j] += np.sqrt(width**2 + height**2 + depth**2)
+
     else:
         mask_npy = None
         mask_onehot = None
+        dtm = None
 
     # Apply windowing and normalization to images
     image_npy = np.zeros((*dims, len(image_list)))
@@ -185,7 +201,7 @@ def preprocess_example(config, image_list, mask):
 
         image_npy[..., j] = img
 
-    return image_npy, mask_npy, mask_onehot
+    return image_npy, mask_npy, mask_onehot, dtm
 
 
 def preprocess_dataset(args):
@@ -207,6 +223,9 @@ def preprocess_dataset(args):
 
     labels_dir = os.path.join(args.numpy, 'labels')
     create_empty_dir(labels_dir)
+
+    dtms_dir = os.path.join(args.numpy, 'dtms')
+    create_empty_dir(dtms_dir)
 
     # Get class weights if they exist
     # Else we compute them
@@ -237,7 +256,7 @@ def preprocess_dataset(args):
             mask = patient['mask']
 
             # Preprocess a single example
-            image_npy, mask_npy, mask_onehot = preprocess_example(config, image_list, mask)
+            image_npy, mask_npy, mask_onehot, dtm = preprocess_example(config, image_list, mask)
 
             # Compute class weights
             if compute_weights:
@@ -259,6 +278,7 @@ def preprocess_dataset(args):
             mask_npy = np.argmax(mask_onehot, axis=-1)
             mask_npy = np.reshape(mask_npy, (*mask_npy.shape, 1))
             np.save(os.path.join(labels_dir, '{}.npy'.format(patient['id'])), mask_npy.astype(np.uint8))
+            np.save(os.path.join(dtms_dir, '{}.npy'.format(patient['id'])), dtm.astype(np.float32))
 
     # Finalize class weights
     if compute_weights:

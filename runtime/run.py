@@ -36,8 +36,15 @@ from data_loading.dali_loader import get_training_dataset, get_validation_datase
 from models.get_model import get_model
 from runtime.loss import get_loss, DiceLoss, VAELoss
 from inference.main_inference import predict_single_example
-from runtime.utils import get_optimizer, get_lr_schedule, Mean, get_test_df, create_model_config_file, \
-    load_model_from_config, get_master_port
+from runtime.utils import (
+    get_optimizer,
+    get_lr_schedule,
+    Mean,
+    get_test_df,
+    create_model_config_file,
+    load_model_from_config,
+    AlphaSchedule
+)
 
 console = Console()
 
@@ -74,7 +81,7 @@ class Trainer:
             self.depth = self.args.depth
 
         # Get latent dimension for VAE regularization
-        self.latent_dim = int(np.prod(np.array(self.patch_size) // 2**self.depth))
+        self.latent_dim = int(np.prod(np.array(self.patch_size) // 2 ** self.depth))
 
         # Create model configuration file for inference later
         self.model_config_path = os.path.join(self.args.results, "models", "model_config.json")
@@ -86,16 +93,22 @@ class Trainer:
                                                      self.model_config_path)
 
         # Get class weights if we are using them
-        if self.args.use_precomputed_weights:
+        if self.args.use_precomputed_class_weights:
             self.class_weights = self.config['class_weights']
         else:
             self.class_weights = None
 
         # Get standard dice loss for validation
-        self.dice_loss = DiceLoss()
+        self.val_loss = DiceLoss()
 
         # Get VAE regularization loss
         self.vae_loss = VAELoss()
+
+        # Get alpha scheduler
+        self.alpha = AlphaSchedule(self.args.epochs,
+                                   self.args.alpha_scheduler,
+                                   init_pause=self.args.linear_schedule_pause,
+                                   step_length=self.args.step_schedule_step_length)
 
     def predict_on_val(self, model_path, loader, df):
         # Load model
@@ -142,7 +155,7 @@ class Trainer:
     # Set up for distributed training
     def setup(self, rank, world_size):
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = get_master_port()
+        os.environ['MASTER_PORT'] = self.args.master_port
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
     # Clean up processes after distributed training
@@ -165,6 +178,9 @@ class Trainer:
         labels_dir = os.path.join(self.args.numpy, 'labels')
         labels = [os.path.join(labels_dir, file) for file in os.listdir(labels_dir)]
 
+        dtms_dir = os.path.join(self.args.numpy, 'dtms')
+        dtms = [os.path.join(dtms_dir, file) for file in os.listdir(dtms_dir)]
+
         splits = kfold.split(list(range(len(images))))
 
         # Extract folds so that users can specify folds to train on
@@ -183,12 +199,18 @@ class Trainer:
         for fold in self.args.folds:
             train_images = [images[idx] for idx in train_splits[fold]]
             train_labels = [labels[idx] for idx in train_splits[fold]]
+            train_dtms = [dtms[idx] for idx in train_splits[fold]]
+            zip_labels_dtms = [vol for vol in zip(train_labels, train_dtms)]
 
             # Get validation set from training split
-            train_images, val_images, train_labels, val_labels = train_test_split(train_images,
-                                                                                  train_labels,
-                                                                                  test_size=0.1,
-                                                                                  random_state=self.args.seed)
+            train_images, val_images, train_labels_dtms, val_labels_dtms = train_test_split(train_images,
+                                                                                            zip_labels_dtms,
+                                                                                            test_size=0.1,
+                                                                                            random_state=self.args.seed)
+
+            train_labels = [vol[0] for vol in train_labels_dtms]
+            train_dtms = [vol[1] for vol in train_labels_dtms]
+            val_labels = [vol[0] for vol in val_labels_dtms]
 
             # Get number of validation steps per epoch
             # Divide by world size since this dataset is sharded across all GPUs
@@ -197,6 +219,7 @@ class Trainer:
             # Get DALI loaders
             train_loader = get_training_dataset(train_images,
                                                 train_labels,
+                                                train_dtms,
                                                 batch_size=self.args.batch_size // world_size,
                                                 oversampling=self.args.oversampling,
                                                 patch_size=self.patch_size,
@@ -251,16 +274,23 @@ class Trainer:
                 best_model_name = os.path.join(self.args.results, 'models', 'fold_{}.pt'.format(fold))
 
             # Function to perform a single training step
-            def train_step(image, label):
+            def train_step(image, label, dtm, epoch):
                 # Loss computation
                 def compute_loss():
                     output = model(image)
 
-                    loss = loss_fn(label, output["prediction"])
+                    if self.args.loss in ["bl", "hl", "gsl"]:
+                        alpha = self.alpha(epoch)
+                        loss = loss_fn(label, output["prediction"], dtm, alpha)
+                    else:
+                        loss = loss_fn(label, output["prediction"])
 
                     if self.args.deep_supervision:
                         for k, p in enumerate(output["deep_supervision"]):
-                            loss += 0.5 ** (k + 1) * loss_fn(label, p)
+                            if self.args.loss in ["bl", "hl", "gsl"]:
+                                loss += 0.5 ** (k + 1) * loss_fn(label, p, dtm, alpha)
+                            else:
+                                loss += 0.5 ** (k + 1) * loss_fn(label, p)
 
                         c_norm = 1 / (2 - 2 ** (-(len(output["deep_supervision"]) + 1)))
                         loss *= c_norm
@@ -328,7 +358,7 @@ class Trainer:
                                                 predictor=model,
                                                 device=torch.device("cuda"))
 
-                return self.dice_loss(label, pred)
+                return self.val_loss(label, pred)
 
             for epoch in range(self.args.epochs):
                 # Make sure gradient tracking is on, and do a pass over the data
@@ -337,10 +367,10 @@ class Trainer:
                     with TrainProgressBar(epoch + 1, fold, self.args.epochs, self.args.steps_per_epoch) as pb:
                         for i in range(self.args.steps_per_epoch):
                             data = train_loader.next()[0]
-                            image, label = data["image"], data["label"]
+                            image, label, dtm = data["image"], data["label"], data["dtm"]
 
                             # Compute loss for single step
-                            loss = train_step(image, label)
+                            loss = train_step(image, label, dtm, epoch)
 
                             # Send all training losses to device 0 for average
                             dist.reduce(loss, dst=0)
@@ -352,10 +382,10 @@ class Trainer:
                 else:
                     for i in range(self.args.steps_per_epoch):
                         data = train_loader.next()[0]
-                        image, label = data["image"], data["label"]
+                        image, label, dtm = data["image"], data["label"], data["dtm"]
 
                         # Compute loss for single step
-                        loss = train_step(image, label)
+                        loss = train_step(image, label, dtm, epoch)
 
                         # Send loss to device 0
                         dist.reduce(loss, dst=0)

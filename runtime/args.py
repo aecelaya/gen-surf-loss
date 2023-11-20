@@ -57,6 +57,7 @@ def get_main_args():
     p.arg("--data", type=str, help="Path to dataset json file")
     p.arg("--gpus", nargs="+", default=[-1], type=int, help="Which gpu(s) to use, defaults to all available GPUs")
     p.arg("--num-workers", type=positive_int, default=8, help="Number of workers to use for data loading")
+    p.arg("--master-port", type=str, default="12355", help="Master port for multi-gpu training")
     p.arg("--seed", type=non_negative_int, default=42, help="Random seed")
     p.boolean_flag("--tta", default=False, help="Enable test time augmentation")
 
@@ -113,15 +114,29 @@ def get_main_args():
 
     # Preprocessing
     p.boolean_flag("--use-n4-bias-correction", default=False, help="Use N4 bias field correction (only for MR images)")
-    p.boolean_flag("--use-precomputed-weights", default=False, help="Use precomputed class weights")
+    p.boolean_flag("--use-precomputed-class-weights", default=False, help="Use precomputed class weights")
     p.arg("--class-weights", nargs="+", type=float, help="Specify class weights")
 
     # Loss function
     p.arg("--loss",
           type=str,
           default="dice_ce",
-          choices=["dice_ce", "dice", "gdl"],
-          help="Loss function for training")
+          choices=["dice_ce", "dice", "gdl", "gdl_ce", "bl", "hl", "gsl"],
+          help="Loss function for training"
+    p.arg("--alpha-scheduler",
+          type=str,
+          default="linear",
+          choices=["linear", "step", "cosine"],
+          help="Choice of alpha scheduler for boundary losses")
+    p.arg("--linear-schedule-pause",
+          type=positive_int,
+          default=5,
+          help="Number of epochs before linear alpha scheduler starts")
+    p.arg("--step-schedule-step-length",
+          type=positive_int,
+          default=5,
+          help="Number of epochs before in each section of the step-wise alpha scheduler")
+
 
     # Sliding window inference
     p.arg("--sw-overlap",

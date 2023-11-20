@@ -1,8 +1,7 @@
 {
     "task": "brats2020",
     "modality": "mr",
-    "train-data": "/workspace/data/brats_2020/raw/train",
-    "test-data": "/workspace/data/brats_2020/raw/validation",
+    "train-data": "/path/to/brats/data/",
     "mask": [
         "seg.nii.gz"
       ],
