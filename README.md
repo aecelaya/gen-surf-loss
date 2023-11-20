@@ -2,13 +2,17 @@
 
 Code for implementing and testing the Generalized Surface Loss (GSL).
 
-Please cite the following if you use this loss function or code for your own work:
+[//]: # (Please cite the following if you use this loss function or code for your own work:)
 
-> [A. Celaya, B. Riviere, D. Fuentes. "A Generalized Surface Loss for Reducing the Hausdorff Distance in 
-> Medical Imaging Segmentation," arXiv preprint arXiv:2302.03868, 2023.](https://arxiv.org/abs/2302.03868)
-> 
-> [A. Celaya et al., "PocketNet: A Smaller Neural Network For Medical Image Analysis," in 
-> IEEE Transactions on Medical Imaging, doi: 10.1109/TMI.2022.3224873.](https://ieeexplore.ieee.org/document/9964128)
+[//]: # (> [A. Celaya, B. Riviere, D. Fuentes. "A Generalized Surface Loss for Reducing the Hausdorff Distance in )
+
+[//]: # (> Medical Imaging Segmentation," arXiv preprint arXiv:2302.03868, 2023.]&#40;https://arxiv.org/abs/2302.03868&#41;)
+
+[//]: # (> )
+
+[//]: # (> [A. Celaya et al., "PocketNet: A Smaller Neural Network For Medical Image Analysis," in )
+
+[//]: # (> IEEE Transactions on Medical Imaging, doi: 10.1109/TMI.2022.3224873.]&#40;https://ieeexplore.ieee.org/document/9964128&#41;)
 
 ### Data
 
