@@ -1,5 +1,7 @@
 # Generalized Surface Loss
 
+## For latest implementation, please see here: <https://github.com/mist-medical/MIST>
+
 Code for implementing and testing the Generalized Surface Loss (GSL).
 
 [//]: # (Please cite the following if you use this loss function or code for your own work:)
